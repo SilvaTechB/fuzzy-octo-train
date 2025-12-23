@@ -1,4 +1,4 @@
-// silva.js — Updated with fixes for group functionality and error handling
+// silva.js — Updated with NEW Plugin Manager, MODE system, and enhanced structure
 const { File: BufferFile } = require('node:buffer');
 global.File = BufferFile;
 
@@ -21,7 +21,7 @@ const {
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const zlib = require('zlib'); // Added for session decompression
+const zlib = require('zlib');
 const express = require('express');
 const P = require('pino');
 const { handleMessages } = require('./handler');
@@ -31,7 +31,6 @@ const store = makeInMemoryStore({ logger: P({ level: 'silent' }) });
 const prefix = config.PREFIX || '.';
 const tempDir = path.join(os.tmpdir(), 'silva-cache');
 const port = process.env.PORT || 25680;
-const pluginsDir = path.join(__dirname, 'plugins');
 
 // ✅ Session paths
 const sessionDir = path.join(__dirname, 'session');
@@ -45,7 +44,97 @@ function createDirIfNotExist(dir) {
 }
 createDirIfNotExist(sessionDir);
 
+// ==========================================
+// ✅ FIX 1: NEW PLUGIN MANAGER CLASS
+// ==========================================
+class PluginManager {
+    constructor() {
+        this.commandHandlers = new Map();
+        this.pluginInfo = new Map();
+    }
+
+    async loadPlugins(dir = 'silvaxlab') {
+        try {
+            const pluginDir = path.join(__dirname, dir);
+            
+            if (!fs.existsSync(pluginDir)) {
+                fs.mkdirSync(pluginDir, { recursive: true });
+                logMessage('INFO', `Created plugin directory: ${dir}`);
+                return;
+            }
+
+            const pluginFiles = fs.readdirSync(pluginDir)
+                .filter(file => file.endsWith('.js') && !file.startsWith('_'));
+
+            logMessage('INFO', `Found ${pluginFiles.length} plugin(s) in ${dir}`);
+
+            for (const file of pluginFiles) {
+                try {
+                    const pluginPath = path.join(pluginDir, file);
+                    delete require.cache[require.resolve(pluginPath)];
+                    
+                    const pluginModule = require(pluginPath);
+                    
+                    if (pluginModule && pluginModule.handler && pluginModule.handler.command) {
+                        const handler = pluginModule.handler;
+                        
+                        // Store command handler
+                        this.commandHandlers.set(handler.command, handler);
+                        
+                        // Store plugin info with proper structure
+                        this.pluginInfo.set(handler.command.source, {
+                            help: handler.help || [],
+                            tags: handler.tags || [],
+                            group: handler.group || false,
+                            admin: handler.admin || false,
+                            botAdmin: handler.botAdmin || false,
+                            owner: handler.owner || false,
+                            filename: file
+                        });
+                        
+                        logMessage('SUCCESS', `✅ Loaded plugin: ${file.replace('.js', '')}`);
+                    } else {
+                        logMessage('WARNING', `Plugin ${file} has invalid format - missing handler.command`);
+                    }
+                } catch (error) {
+                    logMessage('ERROR', `Failed to load plugin ${file}: ${error.message}`);
+                }
+            }
+            
+            logMessage('SUCCESS', `✅ Total plugins loaded: ${this.commandHandlers.size}`);
+        } catch (error) {
+            logMessage('ERROR', `Plugin loading error: ${error.message}`);
+        }
+    }
+
+    getCommandList() {
+        const commands = [];
+        for (const [source, info] of this.pluginInfo) {
+            commands.push({
+                command: source.replace(/^\^|\$/g, ''), // Remove regex symbols
+                help: info.help[0] || 'No description',
+                tags: info.tags,
+                group: info.group,
+                admin: info.admin,
+                owner: info.owner,
+                botAdmin: info.botAdmin
+            });
+        }
+        return commands;
+    }
+}
+
+// Initialize Plugin Manager
+const plugins = new PluginManager();
+
+// ✅ Load plugins on startup
+async function loadPlugins() {
+    await plugins.loadPlugins('silvaxlab');
+}
+
+// ==========================================
 // ✅ Load session from compressed base64
+// ==========================================
 async function loadSession() {
     try {
         // Remove old session file if exists
@@ -135,25 +224,6 @@ setInterval(() => {
     } catch (e) { /* ignore */ }
 }, 5 * 60 * 1000);
 
-// ✅ Load Plugins
-let plugins = new Map();
-function loadPlugins() {
-    if (!fs.existsSync(pluginsDir)) fs.mkdirSync(pluginsDir);
-    const files = fs.readdirSync(pluginsDir).filter(file => file.endsWith('.js'));
-    plugins.clear();
-    for (const file of files) {
-        try {
-            delete require.cache[require.resolve(path.join(pluginsDir, file))];
-            const plugin = require(path.join(pluginsDir, file));
-            plugins.set(file.replace('.js', ''), plugin);
-        } catch (err) {
-            logMessage('ERROR', `Failed loading plugin ${file}: ${err.message}`);
-        }
-    }
-    logMessage('INFO', `✅ Loaded ${plugins.size} plugins`);
-}
-loadPlugins();
-
 // ✅ Utility helpers
 async function downloadAsBuffer(messageObj, typeHint = 'file') {
     try {
@@ -178,7 +248,9 @@ function isBotMentioned(message, botJid) {
     }
 }
 
-// ✅ Generate Config Table
+// ==========================================
+// ✅ FIX 6: Updated generateConfigTable function
+// ==========================================
 function generateConfigTable() {
     const configs = [
         { name: 'MODE', value: config.MODE },
@@ -189,8 +261,8 @@ function generateConfigTable() {
         { name: 'AUTO_STATUS_REPLY', value: config.AUTO_STATUS_REPLY },
         { name: 'AUTO_REACT_NEWSLETTER', value: config.AUTO_REACT_NEWSLETTER },
         { name: 'ANTI_LINK', value: config.ANTI_LINK },
-        { name: 'ALWAYS_ONLINE', value: config.ALWAYS_ONLINE },
-        { name: 'GROUP_COMMANDS', value: config.GROUP_COMMANDS }
+        { name: 'ALWAYS_ONLINE', value: config.ALWAYS_ONLINE }
+        // GROUP_COMMANDS removed!
     ];
 
     let table = '╔══════════════════════════╦═══════════╗\n';
@@ -243,7 +315,7 @@ async function sendWelcomeMessage(sock) {
 
 • **Prefix:** \`${prefix}\`
 • **Mode:** ${config.MODE}
-• **Plugins Loaded:** ${plugins.size}
+• **Plugins Loaded:** ${plugins.commandHandlers.size}
 
 *⚙️ Active Configuration:*
 \`\`\`
@@ -332,14 +404,6 @@ async function connectToWhatsApp() {
         logMessage('WARN', `store.bind failed: ${e.message}`);
     }
 
-    // keep handler's setup in place if your handler requires connection hooks
-    try {
-        const { setupConnectionHandlers } = require('./handler');
-        if (typeof setupConnectionHandlers === 'function') setupConnectionHandlers(sock);
-    } catch (e) {
-        logMessage('DEBUG', 'No setupConnectionHandlers exported from handler (ok).');
-    }
-
     // connection update
     sock.ev.on('connection.update', async update => {
         const { connection, lastDisconnect } = update;
@@ -352,6 +416,9 @@ async function connectToWhatsApp() {
         } else if (connection === 'open') {
             logMessage('SUCCESS', '✅ Connected to WhatsApp');
 
+            // Load plugins after connection
+            await loadPlugins();
+            
             // store bot jid for mention detection
             global.botJid = sock.user.id;
 
@@ -359,7 +426,7 @@ async function connectToWhatsApp() {
             await updateProfileStatus(sock);
             await sendWelcomeMessage(sock);
 
-            // ✅ Follow configured newsletter IDs (if available)
+            // ✅ Follow configured newsletter IDs
             const newsletterIds = config.NEWSLETTER_IDS || [
                 '120363276154401733@newsletter',
                 '120363200367779016@newsletter',
@@ -445,7 +512,7 @@ async function connectToWhatsApp() {
         }
     });
 
-    // Anti-delete handler (messages.delete - existing)
+    // Anti-delete handler (messages.delete)
     sock.ev.on('messages.delete', async (item) => {
         try {
             logMessage('DEBUG', 'messages.delete triggered');
@@ -561,12 +628,12 @@ async function connectToWhatsApp() {
         return { inner, msgType };
     }
 
-    // === ONE consolidated messages.upsert handler for statuses, newsletters and commands ===
+    // === MAIN MESSAGE HANDLER ===
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         try {
             if (!Array.isArray(messages) || messages.length === 0) return;
 
-            // ✅ FIX 1: Correct event filtering - process only real-time messages
+            // Process only real-time messages
             if (type && !['notify', 'append'].includes(type)) {
                 logMessage('DEBUG', `Skipping message type: ${type}`);
                 return;
@@ -664,12 +731,10 @@ async function connectToWhatsApp() {
                     } catch (e) {
                         logMessage('ERROR', `Status handler error: ${e.message}`);
                     }
-
-                    // continue to next message in the upsert array
                     continue;
                 }
 
-                // ---- For other messages: newsletter / broadcast / group / private commands
+                // ---- For other messages
                 if (!m.message) continue;
 
                 const sender = m.key.remoteJid;
@@ -679,10 +744,9 @@ async function connectToWhatsApp() {
 
                 logMessage('MESSAGE', `New ${isNewsletter ? 'newsletter' : isGroupMsg ? 'group' : isBroadcast ? 'broadcast' : 'private'} message from ${sender}`);
 
-                // --- Auto-react to newsletters / channels
+                // Auto-react to newsletters
                 if (isNewsletter && config.AUTO_REACT_NEWSLETTER) {
                     try {
-                        // pick a random emoji for variety
                         const emojis = ['🤖','🔥','💫','❤️','👍','💯','✨','👏','😎'];
                         const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
                         await sock.sendMessage(m.key.remoteJid, {
@@ -694,10 +758,15 @@ async function connectToWhatsApp() {
                     }
                 }
 
-                // ✅ FIX 2: Simplified group command handling
-                // Allow commands in groups only if GROUP_COMMANDS config is enabled
-                if (isGroupMsg && config.GROUP_COMMANDS !== true) {
-                    logMessage('DEBUG', 'Group commands disabled in config, skipping message.');
+                // ==========================================
+                // ✅ FIX 2: MODE CHECK + MESSAGE PARSING
+                // ==========================================
+                const ownerJid = `${config.OWNER_NUMBER}@s.whatsapp.net`;
+                const isOwner = sender === ownerJid || m.key.fromMe;
+
+                // Private mode: only owner can use commands
+                if (config.MODE === 'private' && !isOwner) {
+                    logMessage('DEBUG', `Private mode: Non-owner (${sender}) message ignored.`);
                     continue;
                 }
 
@@ -754,7 +823,9 @@ async function connectToWhatsApp() {
                     try { await sock.readMessages([m.key]); } catch (e) { /* ignore */ }
                 }
 
-                // CORE commands
+                // ==========================================
+                // ✅ FIX 3: MODE COMMAND
+                // ==========================================
                 if (command === 'ping') {
                     const latency = m.messageTimestamp ? new Date().getTime() - m.messageTimestamp * 1000 : 0;
                     await sock.sendMessage(sender, {
@@ -774,10 +845,36 @@ async function connectToWhatsApp() {
                     continue;
                 }
 
+                if (command === 'mode') {
+                    if (!isOwner) {
+                        await sock.sendMessage(sender, { text: '❌ Owner only command!' }, { quoted: m });
+                        continue;
+                    }
+                    
+                    const newMode = args[0]?.toLowerCase();
+                    if (!newMode || !['private', 'public'].includes(newMode)) {
+                        await sock.sendMessage(sender, { 
+                            text: `📊 *Current MODE:* ${config.MODE}\n\n` +
+                                  `*Usage:* ${prefix}mode <private|public>\n\n` +
+                                  `• *private* - Only owner can use bot\n` +
+                                  `• *public* - Everyone can use bot`,
+                            contextInfo: globalContextInfo
+                        }, { quoted: m });
+                        continue;
+                    }
+                    
+                    config.MODE = newMode;
+                    await sock.sendMessage(sender, { 
+                        text: `✅ Bot MODE changed to: *${newMode.toUpperCase()}*\n\n` +
+                              `${newMode === 'private' ? '🔒 Only you can use the bot now.' : '🌍 Everyone can use the bot now.'}`,
+                        contextInfo: globalContextInfo
+                    }, { quoted: m });
+                    continue;
+                }
+
                 if (command === 'resetsession') {
-                    const ownerJid = `${config.OWNER_NUMBER}@s.whatsapp.net`;
-                    if (sender !== ownerJid) {
-                        await sock.sendMessage(sender, { text: '❌ This command is only for the owner!' }, { quoted: m });
+                    if (!isOwner) {
+                        await sock.sendMessage(sender, { text: '❌ Owner only command!' }, { quoted: m });
                         continue;
                     }
                     if (isGroupMsg) {
@@ -800,14 +897,56 @@ async function connectToWhatsApp() {
                     continue;
                 }
 
+                // ==========================================
+                // ✅ FIX 4: UPDATED MENU COMMAND
+                // ==========================================
                 if (command === 'menu') {
-                    const cmds = ['ping', 'alive', 'menu', 'resetsession'];
-                    for (const plugin of plugins.values()) {
-                        if (Array.isArray(plugin.commands)) cmds.push(...plugin.commands);
+                    const coreCommands = ['ping', 'alive', 'menu', 'mode', 'resetsession'];
+                    const pluginCommands = plugins.getCommandList();
+                    
+                    let menuText = `*✦ ${config.BOT_NAME} ✦ Command Menu*
+
+• *Prefix:* \`${prefix}\`
+• *Mode:* ${config.MODE.toUpperCase()} ${config.MODE === 'private' ? '🔒' : '🌍'}
+• *Plugins Loaded:* ${plugins.commandHandlers.size}
+
+*📋 Core Commands:*
+${coreCommands.map(c => `• ${prefix}${c}`).join('\n')}
+`;
+
+                    if (pluginCommands.length > 0) {
+                        menuText += `\n*🔌 Plugin Commands:*\n`;
+                        
+                        // Group by tags
+                        const grouped = {};
+                        for (const cmd of pluginCommands) {
+                            const tag = cmd.tags[0] || 'misc';
+                            if (!grouped[tag]) grouped[tag] = [];
+                            
+                            let cmdStr = `• ${prefix}${cmd.command}`;
+                            if (cmd.owner) cmdStr += ' 👑';
+                            if (cmd.admin) cmdStr += ' 👮';
+                            if (cmd.group) cmdStr += ' 👥';
+                            cmdStr += ` - ${cmd.help}`;
+                            
+                            grouped[tag].push(cmdStr);
+                        }
+                        
+                        for (const [tag, cmds] of Object.entries(grouped)) {
+                            menuText += `\n*${tag.toUpperCase()}:*\n${cmds.join('\n')}\n`;
+                        }
                     }
-                    const menuText = `*✦ ${config.BOT_NAME} ✦ Command Menu*\n\n` +
-                        cmds.map(c => `• ${prefix}${c}`).join('\n') +
-                        `\n\n⚡ Total Commands: ${cmds.length}\n\n✨ ${config.DESCRIPTION}`;
+
+                    menuText += `\n⚡ *Total Commands:* ${coreCommands.length + pluginCommands.length}
+
+${config.MODE === 'private' ? '🔒 *Private Mode:* Only owner can use bot' : '🌍 *Public Mode:* Everyone can use bot'}
+
+*Legend:*
+👑 = Owner only
+👮 = Admin only  
+👥 = Group only
+
+✨ ${config.DESCRIPTION}`;
 
                     await sock.sendMessage(sender, {
                         image: { url: 'https://files.catbox.moe/5uli5p.jpeg' },
@@ -815,7 +954,7 @@ async function connectToWhatsApp() {
                         contextInfo: {
                             ...globalContextInfo,
                             externalAdReply: {
-                                title: config.BOT_NAME,
+                                title: `${config.BOT_NAME} Menu`,
                                 body: "Explore all available commands",
                                 thumbnailUrl: "https://files.catbox.moe/5uli5p.jpeg",
                                 sourceUrl: "https://github.com/SilvaTechB/silva-md-bot",
@@ -827,27 +966,100 @@ async function connectToWhatsApp() {
                     continue;
                 }
 
-                // Plugin Commands
+                // ==========================================
+                // ✅ FIX 5: NEW PLUGIN COMMANDS HANDLING
+                // ==========================================
                 let pluginFound = false;
-                for (const plugin of plugins.values()) {
-                    if (plugin.commands && plugin.commands.includes(command)) {
+                for (const [cmdRegex, handler] of plugins.commandHandlers.entries()) {
+                    const firstWord = command;
+                    if (cmdRegex.test(firstWord)) {
                         pluginFound = true;
+                        
+                        // Get plugin info
+                        const pluginInfo = plugins.pluginInfo.get(cmdRegex.source);
+                        
                         try {
-                            logMessage('PLUGIN', `Executing plugin: ${plugin.commands}`);
-                            // plugin.handler signature preserved: ({ sock, m, sender, args, contextInfo, isGroup })
-                            await plugin.handler({ sock, m, sender, args, contextInfo: globalContextInfo, isGroup: isGroupMsg });
-                            logMessage('SUCCESS', `Plugin executed: ${plugin.commands}`);
-                        } catch (err) {
-                            // ✅ FIX 3: Enhanced error logging
-                            logMessage('ERROR', `❌ Plugin "${plugin.commands}" failed for command "${command}"`);
-                            logMessage('ERROR', `   Error: ${err.message}`);
-                            logMessage('ERROR', `   Stack: ${err.stack || 'No stack trace'}`);
-                            logMessage('DEBUG', `   Sender: ${sender}, Args: ${args}`);
+                            // Check owner permission
+                            if (pluginInfo?.owner && !isOwner) {
+                                await sock.sendMessage(sender, { 
+                                    text: '👑 Owner only command',
+                                    contextInfo: globalContextInfo 
+                                }, { quoted: m });
+                                break;
+                            }
+                            
+                            // Check group only
+                            if (pluginInfo?.group && !isGroupMsg) {
+                                await sock.sendMessage(sender, { 
+                                    text: '👥 Group only command',
+                                    contextInfo: globalContextInfo 
+                                }, { quoted: m });
+                                break;
+                            }
+                            
+                            // Check admin permission
+                            if (pluginInfo?.admin && isGroupMsg) {
+                                try {
+                                    const metadata = await sock.groupMetadata(sender);
+                                    const userParticipant = metadata.participants.find(p => p.id === (m.key.participant || sender));
+                                    if (!userParticipant || (!userParticipant.admin && !userParticipant.superAdmin)) {
+                                        await sock.sendMessage(sender, { 
+                                            text: '👮 Admin required',
+                                            contextInfo: globalContextInfo 
+                                        }, { quoted: m });
+                                        break;
+                                    }
+                                } catch (e) {
+                                    logMessage('WARN', `Admin check failed: ${e.message}`);
+                                }
+                            }
+                            
+                            // Check bot admin permission
+                            if (pluginInfo?.botAdmin && isGroupMsg) {
+                                try {
+                                    const metadata = await sock.groupMetadata(sender);
+                                    const botJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+                                    const botParticipant = metadata.participants.find(p => p.id === botJid);
+                                    if (!botParticipant || (!botParticipant.admin && !botParticipant.superAdmin)) {
+                                        await sock.sendMessage(sender, { 
+                                            text: '🤖 Bot needs admin rights',
+                                            contextInfo: globalContextInfo 
+                                        }, { quoted: m });
+                                        break;
+                                    }
+                                } catch (e) {
+                                    logMessage('WARN', `Bot admin check failed: ${e.message}`);
+                                }
+                            }
 
-                            // Optionally notify the user
+                            logMessage('PLUGIN', `Executing plugin command: ${command}`);
+                            
+                            // Execute with context structure
+                            await handler.execute({
+                                text: commandText,
+                                jid: sender,
+                                sender: m.key.participant || sender,
+                                isGroup: isGroupMsg,
+                                message: m,
+                                sock: sock,
+                                args: args,
+                                command: command,
+                                prefix: prefix,
+                                isOwner: isOwner,
+                                contextInfo: globalContextInfo,
+                                pluginInfo: pluginInfo
+                            });
+                            
+                            logMessage('SUCCESS', `Plugin executed: ${command}`);
+                        } catch (err) {
+                            logMessage('ERROR', `❌ Plugin "${command}" failed: ${err.message}`);
+                            logMessage('ERROR', `   Stack: ${err.stack || 'No stack trace'}`);
+                            logMessage('ERROR', `   File: ${pluginInfo?.filename || 'unknown'}`);
+                            
                             try {
                                 await sock.sendMessage(sender, {
-                                    text: `❌ Command "${command}" failed. Check bot logs for details.`
+                                    text: `❌ Command "${command}" failed.\n\n*Error:* ${err.message}`,
+                                    contextInfo: globalContextInfo
                                 }, { quoted: m });
                             } catch (sendErr) {
                                 logMessage('WARN', `Could not send error message: ${sendErr.message}`);
@@ -862,7 +1074,7 @@ async function connectToWhatsApp() {
                 }
             }
         } catch (err) {
-            logMessage('ERROR', `messages.upsert consolidated handler error: ${err.stack || err.message}`);
+            logMessage('ERROR', `messages.upsert handler error: ${err.stack || err.message}`);
         }
     });
 
