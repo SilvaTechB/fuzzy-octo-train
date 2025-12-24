@@ -1,37 +1,42 @@
-// silvaxlab/test.js - Testing plugin for the new system
+// silvaxlab/grouptest.js - Test plugin for groups
 module.exports = {
     handler: {
-        command: /^(test|demo)$/i,  // RegEx for command matching
-        help: ['Shows a test message', 'Usage: .test <optional text>'],
-        tags: ['fun', 'utility'],
-        group: false,      // true = group only
-        admin: false,      // true = admin only
-        botAdmin: false,   // true = bot needs admin
-        owner: false,      // true = owner only
+        command: /^(grouptest|gt)$/i,
+        help: ['Group test command - works in groups'],
+        tags: ['group', 'test'],
+        group: true,      // Group only
+        admin: false,     // Doesn't require admin
+        botAdmin: false,  // Bot doesn't need admin
+        owner: false,     // Not owner only
         
         execute: async (context) => {
-            const { sock, message, jid, sender, args, contextInfo, isOwner, command, prefix } = context;
+            const { sock, message, jid, sender, args, isGroup, isOwner } = context;
             
-            const testMessage = `
-✅ *Test Command Executed Successfully!*
+            const metadata = await sock.groupMetadata(jid);
+            const groupName = metadata.subject || 'Unknown Group';
+            const participants = metadata.participants.length;
+            
+            const groupMessage = `
+👥 *Group Test Command*
 
-• *Command:* ${command}
-• *Arguments:* ${args.join(' ') || 'None'}
+• *Group:* ${groupName}
+• *Participants:* ${participants}
 • *Sender:* ${sender.split('@')[0]}
 • *Is Owner:* ${isOwner ? 'Yes 👑' : 'No'}
-• *Time:* ${new Date().toLocaleTimeString()}
+• *Bot Status:* Active in groups
 
-*Plugin System:* Working perfectly! 🚀
-
-Try other commands:
-${prefix}menu - Show all commands
-${prefix}ping - Check bot latency
-${prefix}mode - Change bot mode
+*Session Features:*
+- Auto session recovery
+- Group message support
+- Permission checks
             `.trim();
             
             await sock.sendMessage(jid, {
-                text: testMessage,
-                contextInfo: contextInfo
+                text: groupMessage,
+                contextInfo: {
+                    ...context.contextInfo,
+                    mentionedJid: [sender]
+                }
             }, { quoted: message });
         }
     }
