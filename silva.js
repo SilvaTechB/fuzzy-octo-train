@@ -24,7 +24,6 @@ const os = require('os');
 const zlib = require('zlib');
 const express = require('express');
 const P = require('pino');
-const { handleMessages } = require('./handler');
 const config = require('./config.js');
 const store = makeInMemoryStore({ logger: P({ level: 'silent' }) });
 
@@ -111,7 +110,7 @@ class PluginManager {
         const commands = [];
         for (const [source, info] of this.pluginInfo) {
             commands.push({
-                command: source.replace(/^\^|\$/g, ''), // Remove regex symbols
+                command: source.replace(/^\^\(|\$/g, '').replace(/\|/g, ',').replace(/\$/g, '').replace(/i\)\$/g, ''),
                 help: info.help[0] || 'No description',
                 tags: info.tags,
                 group: info.group,
@@ -764,11 +763,14 @@ async function connectToWhatsApp() {
                 const ownerJid = `${config.OWNER_NUMBER}@s.whatsapp.net`;
                 const isOwner = sender === ownerJid || m.key.fromMe;
 
-                // Private mode: only owner can use commands
+                // Private mode: only owner can use commands (in groups AND private chats)
                 if (config.MODE === 'private' && !isOwner) {
                     logMessage('DEBUG', `Private mode: Non-owner (${sender}) message ignored.`);
                     continue;
                 }
+
+                // Public mode: everyone can use commands everywhere (groups + private)
+                // No additional checks needed!
 
                 // Extract text content for command parsing
                 const messageType = Object.keys(m.message)[0];
@@ -793,23 +795,12 @@ async function connectToWhatsApp() {
 
                 logMessage('DEBUG', `Message content: ${content.substring(0, 100)}`);
 
-                // determine if message is for the bot (prefix or mention in groups)
-                let isForBot = false;
-                if (isGroupMsg) {
-                    isForBot = content.startsWith(prefix) || isMentioned;
-                } else {
-                    isForBot = content.startsWith(prefix);
-                }
+                // ✅ TREAT GROUPS LIKE PRIVATE MESSAGES - Only check for prefix
+                let isForBot = content.startsWith(prefix);
 
                 if (!isForBot) {
-                    logMessage('INFO', 'Message not for bot, ignoring.');
+                    logMessage('DEBUG', 'Message not for bot, ignoring.');
                     continue;
-                }
-
-                // remove mention text if present
-                if (isMentioned) {
-                    const botNumber = (global.botJid || '').split('@')[0];
-                    content = content.replace(new RegExp(`@${botNumber}\\s*`, 'i'), '').trim();
                 }
 
                 // extract command and args
@@ -823,9 +814,7 @@ async function connectToWhatsApp() {
                     try { await sock.readMessages([m.key]); } catch (e) { /* ignore */ }
                 }
 
-                // ==========================================
-                // ✅ FIX 3: MODE COMMAND
-                // ==========================================
+                // CORE commands
                 if (command === 'ping') {
                     const latency = m.messageTimestamp ? new Date().getTime() - m.messageTimestamp * 1000 : 0;
                     await sock.sendMessage(sender, {
@@ -845,6 +834,9 @@ async function connectToWhatsApp() {
                     continue;
                 }
 
+                // ==========================================
+                // ✅ FIX 3: MODE COMMAND
+                // ==========================================
                 if (command === 'mode') {
                     if (!isOwner) {
                         await sock.sendMessage(sender, { text: '❌ Owner only command!' }, { quoted: m });
