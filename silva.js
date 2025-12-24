@@ -1,4 +1,4 @@
-// silva.js — Updated with NEW Plugin Manager, MODE system, and enhanced structure
+// silva.js — Updated with Session Recovery Wrapper and Plugin System
 const { File: BufferFile } = require('node:buffer');
 global.File = BufferFile;
 
@@ -42,6 +42,57 @@ function createDirIfNotExist(dir) {
     }
 }
 createDirIfNotExist(sessionDir);
+
+// ==========================================
+// ✅ SESSION RECOVERY WRAPPER
+// ==========================================
+function wrapSocketWithRetry(sock) {
+    const originalSendMessage = sock.sendMessage.bind(sock);
+    
+    sock.sendMessage = async (jid, content, options = {}) => {
+        let attempts = 0;
+        const maxAttempts = 3;
+        
+        while (attempts < maxAttempts) {
+            try {
+                return await originalSendMessage(jid, content, options);
+            } catch (error) {
+                attempts++;
+                
+                if (error.message?.includes('No sessions') && attempts < maxAttempts) {
+                    logMessage('WARN', `Session error on attempt ${attempts}, recovering...`);
+                    
+                    // Reset session for groups
+                    if (jid.endsWith('@g.us')) {
+                        try {
+                            await originalSendMessage(jid, {
+                                protocolMessage: { 
+                                    senderKeyDistributionMessage: { groupId: jid } 
+                                }
+                            });
+                            await new Promise(resolve => setTimeout(resolve, 1500));
+                            logMessage('INFO', 'Group session reset, retrying...');
+                            continue; // Retry
+                        } catch (resetErr) {
+                            logMessage('ERROR', `Session reset failed: ${resetErr.message}`);
+                        }
+                    }
+                    
+                    // Wait before retry
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    continue;
+                }
+                
+                // Not a session error or max attempts reached
+                throw error;
+            }
+        }
+        
+        throw new Error('Failed after ' + maxAttempts + ' attempts');
+    };
+    
+    return sock;
+}
 
 // ==========================================
 // ✅ FIX 1: NEW PLUGIN MANAGER CLASS
@@ -395,6 +446,9 @@ async function connectToWhatsApp() {
         getMessage: async () => undefined,
         ...cryptoOptions
     });
+
+    // ✅ Wrap socket with auto-retry
+    wrapSocketWithRetry(sock);
 
     // bind the store so store.loadMessage works
     try {
